@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      - name: Inspect Android project
+      - name: Inspect project
         shell: bash
         run: |
           set -euo pipefail
@@ -43,10 +43,10 @@ jobs:
           echo "VoltSense Android Project"
           echo "======================================"
 
-          test -f "settings.gradle.kts"
-          test -f "build.gradle.kts"
-          test -f "app/build.gradle.kts"
-          test -f "app/src/main/AndroidManifest.xml"
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
 
           echo "Project structure OK."
 
@@ -61,48 +61,57 @@ jobs:
             --gradle-version 9.3.1 \
             --distribution-type bin
 
-          test -f "./gradlew"
-          test -f "./gradle/wrapper/gradle-wrapper.jar"
-          test -f "./gradle/wrapper/gradle-wrapper.properties"
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.jar
+          test -f gradle/wrapper/gradle-wrapper.properties
 
-          chmod +x ./gradlew
+          chmod +x gradlew
 
           ./gradlew --version
 
-      - name: Prepare CI-only Google Services configuration
+      - name: Create matching CI Google Services configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking Google Services configuration..."
+          echo "======================================"
+          echo "Creating CI Google Services config"
+          echo "======================================"
 
-          if [[ -f "app/google-services.json" ]]; then
-            echo "Existing google-services.json found."
-            exit 0
-          fi
+          APP_GRADLE="app/build.gradle.kts"
 
+          # Read the actual applicationId first.
           PACKAGE_NAME="$(
-            grep -oE 'namespace[[:space:]]*=[[:space:]]*"[^"]+"' \
-              app/build.gradle.kts \
-              | head -n 1 \
-              | sed -E 's/.*"([^"]+)".*/\1/'
+            sed -nE \
+              's/^[[:space:]]*applicationId[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+              "$APP_GRADLE" \
+              | head -n 1
           )"
 
-          if [[ -z "${PACKAGE_NAME}" ]]; then
+          # Fall back to namespace if applicationId is not explicitly declared.
+          if [[ -z "$PACKAGE_NAME" ]]; then
             PACKAGE_NAME="$(
-              grep -oE 'applicationId[[:space:]]*=[[:space:]]*"[^"]+"' \
-                app/build.gradle.kts \
-                | head -n 1 \
-                | sed -E 's/.*"([^"]+)".*/\1/'
+              sed -nE \
+                's/^[[:space:]]*namespace[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+                "$APP_GRADLE" \
+                | head -n 1
             )"
           fi
 
-          if [[ -z "${PACKAGE_NAME}" ]]; then
+          if [[ -z "$PACKAGE_NAME" ]]; then
             echo "ERROR: Could not determine Android package name."
             exit 1
           fi
 
-          echo "Detected package: ${PACKAGE_NAME}"
+          echo "Detected Android package:"
+          echo "$PACKAGE_NAME"
+
+          # IMPORTANT:
+          # Always replace the repository copy in the CI workspace.
+          # This prevents an incompatible checked-in google-services.json
+          # from causing:
+          # "No matching client found for package name".
+          rm -f app/google-services.json
 
           cat > app/google-services.json <<EOF
           {
@@ -116,7 +125,7 @@ jobs:
                 "client_info": {
                   "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
                   "android_client_info": {
-                    "package_name": "${PACKAGE_NAME}"
+                    "package_name": "$PACKAGE_NAME"
                   }
                 },
                 "oauth_client": [],
@@ -134,7 +143,66 @@ jobs:
 
           test -s app/google-services.json
 
-          echo "CI-only Google Services configuration created."
+          echo
+          echo "Generated configuration:"
+          cat app/google-services.json
+
+      - name: Verify Google Services package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="app/build.gradle.kts"
+
+          PACKAGE_NAME="$(
+            sed -nE \
+              's/^[[:space:]]*applicationId[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+              "$APP_GRADLE" \
+              | head -n 1
+          )"
+
+          if [[ -z "$PACKAGE_NAME" ]]; then
+            PACKAGE_NAME="$(
+              sed -nE \
+                's/^[[:space:]]*namespace[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+                "$APP_GRADLE" \
+                | head -n 1
+            )"
+          fi
+
+          echo "Expected package: $PACKAGE_NAME"
+
+          python3 - "$PACKAGE_NAME" <<'PY'
+          import json
+          import sys
+
+          expected = sys.argv[1]
+
+          with open("app/google-services.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          clients = data.get("client", [])
+
+          matches = [
+              client
+              for client in clients
+              if client.get("client_info", {})
+                  .get("android_client_info", {})
+                  .get("package_name") == expected
+          ]
+
+          if not matches:
+              print(
+                  "ERROR: google-services.json does not contain "
+                  f"a client for {expected}"
+              )
+              sys.exit(1)
+
+          print(
+              "PASS: google-services.json contains matching "
+              f"client for {expected}"
+          )
+          PY
 
       - name: Static audit
         shell: bash
@@ -145,13 +213,14 @@ jobs:
           echo "VoltSense Static Audit"
           echo "======================================"
 
-          test -f "./gradlew"
-          test -f "./gradle/wrapper/gradle-wrapper.jar"
-          test -f "./settings.gradle.kts"
-          test -f "./build.gradle.kts"
-          test -f "./app/build.gradle.kts"
-          test -f "./app/src/main/AndroidManifest.xml"
-          test -f "./app/google-services.json"
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.jar
+          test -f gradle/wrapper/gradle-wrapper.properties
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/google-services.json
 
           SOURCE_COUNT="$(
             find app/src/main \
@@ -160,23 +229,23 @@ jobs:
               | wc -l
           )"
 
-          if [[ "${SOURCE_COUNT}" -eq 0 ]]; then
+          if [[ "$SOURCE_COUNT" -eq 0 ]]; then
             echo "ERROR: No Android source files found."
             exit 1
           fi
 
-          echo "Android source files: ${SOURCE_COUNT}"
+          echo "Android source files: $SOURCE_COUNT"
 
-          echo "Checking application source for actual hard-coded secrets..."
+          echo "Checking application source for hard-coded secrets..."
 
           SECRET_FOUND=0
 
           while IFS= read -r -d '' FILE; do
             if grep -nE \
               'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
-              "${FILE}" >/dev/null 2>&1; then
+              "$FILE" >/dev/null 2>&1; then
 
-              echo "Possible secret found in: ${FILE}"
+              echo "Possible secret found in: $FILE"
               SECRET_FOUND=1
             fi
           done < <(
@@ -191,7 +260,7 @@ jobs:
               -print0
           )
 
-          if [[ "${SECRET_FOUND}" -ne 0 ]]; then
+          if [[ "$SECRET_FOUND" -ne 0 ]]; then
             echo "ERROR: Possible hard-coded application secret detected."
             exit 1
           fi
@@ -208,11 +277,7 @@ jobs:
             --stacktrace \
             tasks
 
-      # The repository currently contains GreetingScreenshotTest.kt,
-      # which references a nonexistent Greeting symbol.
-      # It is deliberately NOT executed because this workflow's
-      # acceptance target is APK compilation.
-      - name: Verify production Kotlin compilation
+      - name: Compile production Kotlin
         shell: bash
         run: |
           set -euo pipefail
@@ -256,18 +321,18 @@ jobs:
             -name "*.apk" \
             -print
 
-          if [[ ! -f "${APK}" ]]; then
+          if [[ ! -f "$APK" ]]; then
             echo "ERROR: app-debug.apk was not generated."
             exit 1
           fi
 
-          if [[ ! -s "${APK}" ]]; then
-            echo "ERROR: Generated APK is empty."
+          if [[ ! -s "$APK" ]]; then
+            echo "ERROR: APK is empty."
             exit 1
           fi
 
-          echo "APK successfully generated:"
-          ls -lh "${APK}"
+          echo "APK generated successfully:"
+          ls -lh "$APK"
 
       - name: Verify APK signature
         shell: bash
@@ -277,19 +342,19 @@ jobs:
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
           APKSIGNER="$(
-            find "${ANDROID_HOME}/build-tools" \
+            find "$ANDROID_HOME/build-tools" \
               -type f \
               -name "apksigner" \
               | sort -V \
               | tail -n 1
           )"
 
-          if [[ -z "${APKSIGNER}" ]]; then
+          if [[ -z "$APKSIGNER" ]]; then
             echo "ERROR: apksigner not found."
             exit 1
           fi
 
-          "${APKSIGNER}" verify --verbose "${APK}"
+          "$APKSIGNER" verify --verbose "$APK"
 
           echo "APK SIGNATURE VERIFICATION PASSED"
 
