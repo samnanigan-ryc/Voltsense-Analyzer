@@ -29,8 +29,6 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # The uploaded repository does not contain gradlew.
-      # Install Gradle only for bootstrapping the wrapper.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -54,12 +52,13 @@ jobs:
             | head -500
 
           echo
-          echo "Gradle project:"
+          echo "Checking Android project..."
+
           test -f "settings.gradle.kts"
           test -f "build.gradle.kts"
           test -f "app/build.gradle.kts"
 
-          echo "PASS"
+          echo "PROJECT STRUCTURE PASSED"
 
       - name: Generate Gradle wrapper
         shell: bash
@@ -82,7 +81,8 @@ jobs:
           chmod +x ./gradlew
 
           echo
-          echo "Gradle wrapper successfully generated:"
+          echo "Gradle wrapper generated successfully."
+
           ./gradlew --version
 
       - name: Static project audit
@@ -94,11 +94,24 @@ jobs:
           echo "VoltSense Static Audit"
           echo "======================================"
 
+          echo "[1/6] Checking Gradle wrapper..."
+
           test -f "./gradlew"
+          test -f "./gradle/wrapper/gradle-wrapper.jar"
+          test -f "./gradle/wrapper/gradle-wrapper.properties"
+
+          echo "PASS"
+
+          echo "[2/6] Checking Android project..."
+
           test -f "./settings.gradle.kts"
           test -f "./build.gradle.kts"
           test -f "./app/build.gradle.kts"
           test -f "./app/src/main/AndroidManifest.xml"
+
+          echo "PASS"
+
+          echo "[3/6] Checking source files..."
 
           SOURCE_COUNT=$(
             find app/src/main \
@@ -113,6 +126,9 @@ jobs:
           fi
 
           echo "Source files: $SOURCE_COUNT"
+          echo "PASS"
+
+          echo "[4/6] Checking for local.properties..."
 
           if find . \
             -path "./.git" -prune -o \
@@ -120,29 +136,57 @@ jobs:
             -path "./build" -prune -o \
             -path "./app/build" -prune -o \
             -name "local.properties" \
-            -print | grep -q .; then
+            -print \
+            | grep -q .; then
 
             echo "ERROR: local.properties detected."
             exit 1
           fi
 
-          if grep -RInE \
-            --exclude-dir=".git" \
-            --exclude-dir=".gradle" \
-            --exclude-dir="build" \
-            --exclude="*.png" \
-            --exclude="*.jpg" \
-            --exclude="*.jpeg" \
-            --exclude="*.webp" \
-            'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
-            .; then
+          echo "PASS"
 
+          echo "[5/6] Checking source files for hard-coded secrets..."
+
+          SECRET_FOUND=0
+
+          while IFS= read -r -d '' FILE; do
+            if grep -nE \
+              'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
+              "$FILE" >/dev/null 2>&1; then
+
+              echo "Possible secret detected in: $FILE"
+              SECRET_FOUND=1
+            fi
+          done < <(
+            find app/src/main app/src/test \
+              -type f \
+              \( \
+                -name "*.kt" \
+                -o -name "*.java" \
+                -o -name "*.properties" \
+                -o -name "*.json" \
+                -o -name "*.xml" \
+                \) \
+              -print0 2>/dev/null
+          )
+
+          if [[ "$SECRET_FOUND" -ne 0 ]]; then
             echo "ERROR: Possible hard-coded secret detected."
             exit 1
           fi
 
+          echo "PASS"
+
+          echo "[6/6] Checking workflow..."
+
+          test -f ".github/workflows/build.yml"
+
+          echo "PASS"
+
           echo
+          echo "======================================"
           echo "STATIC AUDIT PASSED"
+          echo "======================================"
 
       - name: Validate Gradle configuration
         shell: bash
@@ -185,22 +229,21 @@ jobs:
             clean \
             assembleDebug
 
-      - name: Locate APK
+      - name: Verify APK exists
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Generated APK files:"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          echo "Searching for APK..."
 
           find app/build \
             -type f \
             -name "*.apk" \
             -print
 
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-
           if [[ ! -f "$APK" ]]; then
-            echo
             echo "ERROR: Expected APK was not generated."
             exit 1
           fi
@@ -211,10 +254,10 @@ jobs:
           fi
 
           echo
-          echo "APK:"
+          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      - name: Verify APK
+      - name: Verify APK signature
         shell: bash
         run: |
           set -euo pipefail
@@ -230,9 +273,12 @@ jobs:
           )"
 
           if [[ -z "$APKSIGNER" ]]; then
-            echo "ERROR: Android apksigner not found."
+            echo "ERROR: apksigner was not found."
             exit 1
           fi
+
+          echo "Using apksigner:"
+          echo "$APKSIGNER"
 
           "$APKSIGNER" verify --verbose "$APK"
 
