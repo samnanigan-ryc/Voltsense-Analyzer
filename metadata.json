@@ -1,0 +1,6 @@
+{
+  "name": "VoltSense Analytics",
+  "description": "Analyze electronic device energy consumption, monthly usage, efficiency rating, and replacement recommendations with VoltSense Analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
