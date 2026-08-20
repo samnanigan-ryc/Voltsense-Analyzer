@@ -24,31 +24,66 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-          cache: gradle
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Locate Android project
+      # The uploaded repository does not contain gradlew.
+      # Install Gradle only for bootstrapping the wrapper.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Inspect project
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Repository contents:"
-          find . -maxdepth 3 -type f | sort | head -300
+          echo "======================================"
+          echo "Project structure"
+          echo "======================================"
 
-          if [[ ! -f "./gradlew" ]]; then
-            echo "ERROR: gradlew was not found."
-            exit 1
-          fi
+          find . \
+            -path "./.git" -prune -o \
+            -path "./.gradle" -prune -o \
+            -path "./app/build" -prune -o \
+            -type f -print \
+            | sort \
+            | head -500
 
-          if [[ ! -f "./app/build.gradle.kts" && ! -f "./app/build.gradle" ]]; then
-            echo "ERROR: Android app module was not found."
-            exit 1
-          fi
+          echo
+          echo "Gradle project:"
+          test -f "settings.gradle.kts"
+          test -f "build.gradle.kts"
+          test -f "app/build.gradle.kts"
+
+          echo "PASS"
+
+      - name: Generate Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Generating Gradle wrapper..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            wrapper \
+            --gradle-version 9.3.1 \
+            --distribution-type bin
+
+          test -f "./gradlew"
+          test -f "./gradle/wrapper/gradle-wrapper.jar"
+          test -f "./gradle/wrapper/gradle-wrapper.properties"
 
           chmod +x ./gradlew
+
+          echo
+          echo "Gradle wrapper successfully generated:"
+          ./gradlew --version
 
       - name: Static project audit
         shell: bash
@@ -56,83 +91,90 @@ jobs:
           set -euo pipefail
 
           echo "======================================"
-          echo " VoltSense Static Project Audit"
+          echo "VoltSense Static Audit"
           echo "======================================"
 
-          [[ -f "./gradlew" ]] \
-            || { echo "ERROR: gradlew missing"; exit 1; }
+          test -f "./gradlew"
+          test -f "./settings.gradle.kts"
+          test -f "./build.gradle.kts"
+          test -f "./app/build.gradle.kts"
+          test -f "./app/src/main/AndroidManifest.xml"
 
-          [[ -f "./gradle/wrapper/gradle-wrapper.properties" ]] \
-            || { echo "ERROR: Gradle wrapper missing"; exit 1; }
-
-          [[ -f "./app/build.gradle.kts" || -f "./app/build.gradle" ]] \
-            || { echo "ERROR: app Gradle file missing"; exit 1; }
-
-          [[ -f "./app/src/main/AndroidManifest.xml" ]] \
-            || { echo "ERROR: AndroidManifest.xml missing"; exit 1; }
-
-          if [[ ! -d "./app/src/main" ]]; then
-            echo "ERROR: Android source directory missing."
-            exit 1
-          fi
-
-          SOURCE_COUNT=$(find app/src/main \
-            -type f \
-            \( -name "*.kt" -o -name "*.java" \) \
-            | wc -l)
+          SOURCE_COUNT=$(
+            find app/src/main \
+              -type f \
+              \( -name "*.kt" -o -name "*.java" \) \
+              | wc -l
+          )
 
           if [[ "$SOURCE_COUNT" -eq 0 ]]; then
             echo "ERROR: No Kotlin/Java source files found."
             exit 1
           fi
 
-          echo "Android source files: $SOURCE_COUNT"
+          echo "Source files: $SOURCE_COUNT"
 
           if find . \
             -path "./.git" -prune -o \
+            -path "./.gradle" -prune -o \
             -path "./build" -prune -o \
             -path "./app/build" -prune -o \
             -name "local.properties" \
             -print | grep -q .; then
-              echo "ERROR: local.properties must not be committed."
-              exit 1
+
+            echo "ERROR: local.properties detected."
+            exit 1
           fi
 
           if grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=build \
-            --exclude-dir=.gradle \
+            --exclude-dir=".git" \
+            --exclude-dir=".gradle" \
+            --exclude-dir="build" \
             --exclude="*.png" \
             --exclude="*.jpg" \
             --exclude="*.jpeg" \
             --exclude="*.webp" \
             'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
             .; then
-              echo "ERROR: Possible hard-coded secret detected."
-              exit 1
+
+            echo "ERROR: Possible hard-coded secret detected."
+            exit 1
           fi
 
+          echo
           echo "STATIC AUDIT PASSED"
 
-      - name: Validate Gradle
+      - name: Validate Gradle configuration
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace tasks
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            tasks
 
       - name: Run unit tests
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace testDebugUnitTest
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            testDebugUnitTest
 
       - name: Run Android lint
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace lintDebug
 
-      - name: Build debug APK
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            lintDebug
+
+      - name: Build APK
         shell: bash
         run: |
           set -euo pipefail
@@ -143,17 +185,23 @@ jobs:
             clean \
             assembleDebug
 
-      - name: Verify APK
+      - name: Locate APK
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Generated APK files:"
+
+          find app/build \
+            -type f \
+            -name "*.apk" \
+            -print
+
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
           if [[ ! -f "$APK" ]]; then
-            echo "ERROR: APK was not generated."
-            echo "Searching for generated APK files:"
-            find app/build -type f -name "*.apk" -print 2>/dev/null || true
+            echo
+            echo "ERROR: Expected APK was not generated."
             exit 1
           fi
 
@@ -162,33 +210,36 @@ jobs:
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          echo
+          echo "APK:"
           ls -lh "$APK"
 
-      - name: Verify APK signature
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -type f \
-            -name "apksigner" \
-            | sort -V \
-            | tail -n 1)
+          APKSIGNER="$(
+            find "$ANDROID_HOME/build-tools" \
+              -type f \
+              -name "apksigner" \
+              | sort -V \
+              | tail -n 1
+          )"
 
           if [[ -z "$APKSIGNER" ]]; then
-            echo "ERROR: apksigner was not found."
+            echo "ERROR: Android apksigner not found."
             exit 1
           fi
 
-          echo "Using:"
-          echo "$APKSIGNER"
-
           "$APKSIGNER" verify --verbose "$APK"
 
-      - name: Upload APK artifact
+          echo
+          echo "APK SIGNATURE VERIFICATION PASSED"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: VoltSense-debug-apk
