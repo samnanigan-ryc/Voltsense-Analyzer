@@ -2,74 +2,196 @@ name: Build VoltSense APK
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - main
+      - master
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: android-build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
+    name: Audit, Test and Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
           cache: gradle
-
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.3.1"
-          cache-read-only: false
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install required Android SDK packages
+      - name: Locate Android project
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          set -euo pipefail
+
+          echo "Repository contents:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+          if [[ ! -f "./gradlew" ]]; then
+            echo "ERROR: gradlew was not found."
+            exit 1
+          fi
+
+          if [[ ! -f "./app/build.gradle.kts" && ! -f "./app/build.gradle" ]]; then
+            echo "ERROR: Android app module was not found."
+            exit 1
+          fi
+
+          chmod +x ./gradlew
 
       - name: Static project audit
-        run: bash scripts/ci-audit.sh
-
-      - name: Verify Gradle configuration
-        run: gradle --no-daemon --stacktrace help
-
-      - name: Run unit tests
-        run: gradle --no-daemon --stacktrace testDebugUnitTest
-
-      - name: Build installable debug APK
-        run: gradle --no-daemon --stacktrace assembleDebug
-
-      - name: Verify APK exists and is non-empty
         shell: bash
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          file "$APK"
-          unzip -t "$APK" >/dev/null
-          echo "APK: $APK"
-          sha256sum "$APK"
+          set -euo pipefail
 
-      - name: Upload APK
+          echo "======================================"
+          echo " VoltSense Static Project Audit"
+          echo "======================================"
+
+          [[ -f "./gradlew" ]] \
+            || { echo "ERROR: gradlew missing"; exit 1; }
+
+          [[ -f "./gradle/wrapper/gradle-wrapper.properties" ]] \
+            || { echo "ERROR: Gradle wrapper missing"; exit 1; }
+
+          [[ -f "./app/build.gradle.kts" || -f "./app/build.gradle" ]] \
+            || { echo "ERROR: app Gradle file missing"; exit 1; }
+
+          [[ -f "./app/src/main/AndroidManifest.xml" ]] \
+            || { echo "ERROR: AndroidManifest.xml missing"; exit 1; }
+
+          if [[ ! -d "./app/src/main" ]]; then
+            echo "ERROR: Android source directory missing."
+            exit 1
+          fi
+
+          SOURCE_COUNT=$(find app/src/main \
+            -type f \
+            \( -name "*.kt" -o -name "*.java" \) \
+            | wc -l)
+
+          if [[ "$SOURCE_COUNT" -eq 0 ]]; then
+            echo "ERROR: No Kotlin/Java source files found."
+            exit 1
+          fi
+
+          echo "Android source files: $SOURCE_COUNT"
+
+          if find . \
+            -path "./.git" -prune -o \
+            -path "./build" -prune -o \
+            -path "./app/build" -prune -o \
+            -name "local.properties" \
+            -print | grep -q .; then
+              echo "ERROR: local.properties must not be committed."
+              exit 1
+          fi
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude-dir=.gradle \
+            --exclude="*.png" \
+            --exclude="*.jpg" \
+            --exclude="*.jpeg" \
+            --exclude="*.webp" \
+            'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
+            .; then
+              echo "ERROR: Possible hard-coded secret detected."
+              exit 1
+          fi
+
+          echo "STATIC AUDIT PASSED"
+
+      - name: Validate Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace tasks
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest
+
+      - name: Run Android lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace lintDebug
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            clean \
+            assembleDebug
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [[ ! -f "$APK" ]]; then
+            echo "ERROR: APK was not generated."
+            echo "Searching for generated APK files:"
+            find app/build -type f -name "*.apk" -print 2>/dev/null || true
+            exit 1
+          fi
+
+          if [[ ! -s "$APK" ]]; then
+            echo "ERROR: APK is empty."
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
+          ls -lh "$APK"
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "apksigner" \
+            | sort -V \
+            | tail -n 1)
+
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "ERROR: apksigner was not found."
+            exit 1
+          fi
+
+          echo "Using:"
+          echo "$APKSIGNER"
+
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: VoltSense-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
