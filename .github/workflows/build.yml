@@ -13,12 +13,22 @@ permissions:
 
 jobs:
   build:
-    name: Audit and Build VoltSense APK
+    name: Audit, Test and Build VoltSense APK
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+
+      # ============================================================
+      # JAVA
+      # ============================================================
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -26,15 +36,30 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+
+      # ============================================================
+      # ANDROID SDK
+      # ============================================================
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+
+      # ============================================================
+      # GRADLE
+      # ============================================================
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
-      - name: Inspect project
+
+      # ============================================================
+      # PROJECT STRUCTURE AUDIT
+      # ============================================================
+
+      - name: Inspect Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -43,31 +68,50 @@ jobs:
           echo "VoltSense Android Project"
           echo "======================================"
 
-          test -f settings.gradle.kts
-          test -f build.gradle.kts
-          test -f app/build.gradle.kts
-          test -f app/src/main/AndroidManifest.xml
+          test -f "settings.gradle.kts"
+          test -f "build.gradle.kts"
+          test -f "app/build.gradle.kts"
+          test -f "app/src/main/AndroidManifest.xml"
 
-          echo "Project structure OK."
+          echo
+          echo "Required Android project files found."
+          echo "PROJECT STRUCTURE PASSED"
+
+
+      # ============================================================
+      # GENERATE GRADLE WRAPPER
+      # ============================================================
 
       - name: Generate Gradle wrapper
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "======================================"
+          echo "Generating Gradle wrapper"
+          echo "======================================"
+
           gradle \
             --no-daemon \
+            --stacktrace \
             wrapper \
             --gradle-version 9.3.1 \
             --distribution-type bin
 
-          test -f gradlew
-          test -f gradle/wrapper/gradle-wrapper.jar
-          test -f gradle/wrapper/gradle-wrapper.properties
+          test -f "./gradlew"
+          test -f "./gradle/wrapper/gradle-wrapper.jar"
+          test -f "./gradle/wrapper/gradle-wrapper.properties"
 
-          chmod +x gradlew
+          chmod +x ./gradlew
 
           ./gradlew --version
+
+          echo "GRADLE WRAPPER PASSED"
+
+
+      # ============================================================
+      # GOOGLE SERVICES
+      # ============================================================
 
       - name: Create matching CI Google Services configuration
         shell: bash
@@ -75,12 +119,11 @@ jobs:
           set -euo pipefail
 
           echo "======================================"
-          echo "Creating CI Google Services config"
+          echo "Preparing Google Services"
           echo "======================================"
 
           APP_GRADLE="app/build.gradle.kts"
 
-          # Read the actual applicationId first.
           PACKAGE_NAME="$(
             sed -nE \
               's/^[[:space:]]*applicationId[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
@@ -88,7 +131,6 @@ jobs:
               | head -n 1
           )"
 
-          # Fall back to namespace if applicationId is not explicitly declared.
           if [[ -z "$PACKAGE_NAME" ]]; then
             PACKAGE_NAME="$(
               sed -nE \
@@ -103,17 +145,16 @@ jobs:
             exit 1
           fi
 
-          echo "Detected Android package:"
+          echo "Detected package:"
           echo "$PACKAGE_NAME"
 
-          # IMPORTANT:
-          # Always replace the repository copy in the CI workspace.
-          # This prevents an incompatible checked-in google-services.json
-          # from causing:
-          # "No matching client found for package name".
-          rm -f app/google-services.json
+          # Always create a CI-local configuration.
+          # This prevents an incompatible repository copy from
+          # causing a Google Services package mismatch.
 
-          cat > app/google-services.json <<EOF
+          rm -f "app/google-services.json"
+
+          cat > "app/google-services.json" <<EOF
           {
             "project_info": {
               "project_number": "000000000000",
@@ -141,11 +182,15 @@ jobs:
           }
           EOF
 
-          test -s app/google-services.json
+          test -s "app/google-services.json"
 
-          echo
-          echo "Generated configuration:"
-          cat app/google-services.json
+          echo "Google Services configuration created."
+          echo "GOOGLE SERVICES PREPARATION PASSED"
+
+
+      # ============================================================
+      # VERIFY GOOGLE SERVICES
+      # ============================================================
 
       - name: Verify Google Services package
         shell: bash
@@ -170,15 +215,17 @@ jobs:
             )"
           fi
 
-          echo "Expected package: $PACKAGE_NAME"
-
           python3 - "$PACKAGE_NAME" <<'PY'
           import json
           import sys
 
           expected = sys.argv[1]
 
-          with open("app/google-services.json", "r", encoding="utf-8") as f:
+          with open(
+              "app/google-services.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = json.load(f)
 
           clients = data.get("client", [])
@@ -199,12 +246,19 @@ jobs:
               sys.exit(1)
 
           print(
-              "PASS: google-services.json contains matching "
-              f"client for {expected}"
+              "Google Services package matches:"
+              f" {expected}"
           )
           PY
 
-      - name: Static audit
+          echo "GOOGLE SERVICES VERIFICATION PASSED"
+
+
+      # ============================================================
+      # STATIC AUDIT
+      # ============================================================
+
+      - name: Static project audit
         shell: bash
         run: |
           set -euo pipefail
@@ -213,19 +267,23 @@ jobs:
           echo "VoltSense Static Audit"
           echo "======================================"
 
-          test -f gradlew
-          test -f gradle/wrapper/gradle-wrapper.jar
-          test -f gradle/wrapper/gradle-wrapper.properties
-          test -f settings.gradle.kts
-          test -f build.gradle.kts
-          test -f app/build.gradle.kts
-          test -f app/src/main/AndroidManifest.xml
-          test -f app/google-services.json
+          test -f "./gradlew"
+          test -f "./gradle/wrapper/gradle-wrapper.jar"
+          test -f "./gradle/wrapper/gradle-wrapper.properties"
+
+          test -f "./settings.gradle.kts"
+          test -f "./build.gradle.kts"
+          test -f "./app/build.gradle.kts"
+          test -f "./app/src/main/AndroidManifest.xml"
+          test -f "./app/google-services.json"
 
           SOURCE_COUNT="$(
             find app/src/main \
               -type f \
-              \( -name "*.kt" -o -name "*.java" \) \
+              \( \
+                -name "*.kt" \
+                -o -name "*.java" \
+              \) \
               | wc -l
           )"
 
@@ -236,18 +294,23 @@ jobs:
 
           echo "Android source files: $SOURCE_COUNT"
 
+          echo
           echo "Checking application source for hard-coded secrets..."
 
           SECRET_FOUND=0
 
           while IFS= read -r -d '' FILE; do
+
             if grep -nE \
               'AIza[0-9A-Za-z_-]{20,}|BEGIN PRIVATE KEY|sk-[A-Za-z0-9]{20,}' \
               "$FILE" >/dev/null 2>&1; then
 
-              echo "Possible secret found in: $FILE"
+              echo "Possible secret found in:"
+              echo "$FILE"
+
               SECRET_FOUND=1
             fi
+
           done < <(
             find app/src/main \
               -type f \
@@ -256,7 +319,7 @@ jobs:
                 -o -name "*.java" \
                 -o -name "*.properties" \
                 -o -name "*.json" \
-                \) \
+              \) \
               -print0
           )
 
@@ -265,9 +328,15 @@ jobs:
             exit 1
           fi
 
+          echo
           echo "STATIC AUDIT PASSED"
 
-      - name: Validate Gradle
+
+      # ============================================================
+      # GRADLE VALIDATION
+      # ============================================================
+
+      - name: Validate Gradle configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -276,6 +345,13 @@ jobs:
             --no-daemon \
             --stacktrace \
             tasks
+
+          echo "GRADLE CONFIGURATION PASSED"
+
+
+      # ============================================================
+      # PRODUCTION COMPILATION
+      # ============================================================
 
       - name: Compile production Kotlin
         shell: bash
@@ -287,6 +363,13 @@ jobs:
             --stacktrace \
             compileDebugKotlin
 
+          echo "PRODUCTION KOTLIN COMPILATION PASSED"
+
+
+      # ============================================================
+      # LINT
+      # ============================================================
+
       - name: Run Android lint
         shell: bash
         run: |
@@ -297,10 +380,71 @@ jobs:
             --stacktrace \
             lintDebug
 
+          echo "ANDROID LINT PASSED"
+
+
+      # ============================================================
+      # DEBUG KEYSTORE
+      # ============================================================
+
+      - name: Prepare CI debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "======================================"
+          echo "Preparing debug keystore"
+          echo "======================================"
+
+          KEYSTORE="$GITHUB_WORKSPACE/debug.keystore"
+
+          if [[ -f "$KEYSTORE" ]]; then
+            echo "Existing debug.keystore found."
+          else
+            echo "Generating debug.keystore..."
+
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "$KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+
+            echo "Debug keystore generated."
+          fi
+
+          test -f "$KEYSTORE"
+
+          echo
+          echo "Verifying debug keystore..."
+
+          keytool \
+            -list \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -alias androiddebugkey
+
+          echo
+          echo "DEBUG KEYSTORE PASSED"
+
+
+      # ============================================================
+      # BUILD APK
+      # ============================================================
+
       - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "======================================"
+          echo "Building VoltSense APK"
+          echo "======================================"
 
           ./gradlew \
             --no-daemon \
@@ -308,14 +452,22 @@ jobs:
             clean \
             assembleDebug
 
-      - name: Verify APK
+          echo "GRADLE APK BUILD PASSED"
+
+
+      # ============================================================
+      # APK VALIDATION
+      # ============================================================
+
+      - name: Verify APK exists
         shell: bash
         run: |
           set -euo pipefail
 
           APK="app/build/outputs/apk/debug/app-debug.apk"
 
-          echo "Generated APK files:"
+          echo "Searching for generated APK..."
+
           find app/build \
             -type f \
             -name "*.apk" \
@@ -327,12 +479,21 @@ jobs:
           fi
 
           if [[ ! -s "$APK" ]]; then
-            echo "ERROR: APK is empty."
+            echo "ERROR: Generated APK is empty."
             exit 1
           fi
 
-          echo "APK generated successfully:"
+          echo
+          echo "APK successfully generated:"
           ls -lh "$APK"
+
+          echo
+          echo "APK FILE CHECK PASSED"
+
+
+      # ============================================================
+      # APK SIGNATURE VALIDATION
+      # ============================================================
 
       - name: Verify APK signature
         shell: bash
@@ -350,13 +511,40 @@ jobs:
           )"
 
           if [[ -z "$APKSIGNER" ]]; then
-            echo "ERROR: apksigner not found."
+            echo "ERROR: Android apksigner was not found."
             exit 1
           fi
 
+          echo "Using:"
+          echo "$APKSIGNER"
+
           "$APKSIGNER" verify --verbose "$APK"
 
+          echo
           echo "APK SIGNATURE VERIFICATION PASSED"
+
+
+      # ============================================================
+      # APK ZIP VALIDATION
+      # ============================================================
+
+      - name: Validate APK archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          echo "Checking APK archive integrity..."
+
+          unzip -t "$APK" >/dev/null
+
+          echo "APK ARCHIVE INTEGRITY PASSED"
+
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
